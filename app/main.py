@@ -54,15 +54,34 @@ async def enhance_description(body: EnhancementRequestBody):
         processed_body = preprocessor.preprocess_data(body, {})
         
         # Forward the request to Bielik infill endpoint with OPTIMIZED texts
-        http_response = requests.post(
-            f"{BIELIK_APP_URL}/infill",
-            json=processed_body.model_dump()
-        )
-        http_response.raise_for_status()
-        bielik_response = http_response.json()
+        # We split the request into individual items to ensure atomic processing and avoid timeouts
+        bielik_results = []
         
-        # Extract results from Bielik response
-        bielik_results = bielik_response.get("results", [])
+        # processed_body is a Pydantic model (EnhancementRequestBody)
+        base_request_dict = processed_body.model_dump()
+        items_list = processed_body.items # List of InfillItem objects
+        
+        for item in items_list:
+            # Create a single-item request payload
+            # We copy the base request structure but replace 'items' with just the current item
+            single_item_payload = base_request_dict.copy()
+            single_item_payload["items"] = [item.model_dump()]
+            
+            print(f"MCP: Sending item {item.id} to Bielik...")
+            
+            # Send single item request
+            http_response = requests.post(
+                f"{BIELIK_APP_URL}/infill",
+                json=single_item_payload
+            )
+            http_response.raise_for_status()
+            response_data = http_response.json()
+            
+            # Aggregate results
+            if "results" in response_data:
+                bielik_results.extend(response_data["results"])
+
+        # Original bulk logic removed in favor of loop above
         
         # Apply MCP post-processing if needed
         processed_items = []

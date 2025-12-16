@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 class InfillItem(BaseModel):
     id: str = Field(..., description="Unique identifier for the item")
     text_with_gaps: str = Field(..., description="Text with [GAP:n] markers")
+    attributes: Dict[str, Any] = Field(default_factory=dict, description="Optional context attributes (e.g. make, model)")
 
 class InfillOptions(BaseModel):
     language: str = Field(default="pl", description="Language code (pl/en)")
