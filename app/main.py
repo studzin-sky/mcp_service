@@ -43,20 +43,20 @@ async def enhance_description(body: EnhancementRequestBody):
     start_time = time.time()
     
     try:
-        # Extract gaps and their context for analysis
-        gaps_list = []
-        for item in body.items:
-            text = item.text_with_gaps
-            gaps = extract_gaps(text, context_window=35)
-            gaps_list.extend(gaps)
-            print(f"MCP: Extracted {len(gaps)} gaps from item {item.id}")
-            for gap in gaps:
-                print(f"  GAP:{gap.index}: '{gap.context}'")
+        # 1. Store original texts for reconstruction later
+        original_texts = {item.id: item.text_with_gaps for item in body.items}
         
-        # Forward the request to Bielik infill endpoint
+        # 2. Preprocess: Optimize text (reduce to contexts)
+        # This modifies 'body' in place or returns modified object
+        # We need to be careful with Pydantic models. 
+        # model_dump() creates a dict, let's work with that or modify body items directly.
+        # preprocessor.preprocess_data modifies the Pydantic model in place if it can, or returns it.
+        processed_body = preprocessor.preprocess_data(body, {})
+        
+        # Forward the request to Bielik infill endpoint with OPTIMIZED texts
         http_response = requests.post(
             f"{BIELIK_APP_URL}/infill",
-            json=body.model_dump()
+            json=processed_body.model_dump()
         )
         http_response.raise_for_status()
         bielik_response = http_response.json()
@@ -67,16 +67,30 @@ async def enhance_description(body: EnhancementRequestBody):
         # Apply MCP post-processing if needed
         processed_items = []
         for result in bielik_results:
-            # Extract the filled text and post-process it
-            filled_text = result.get("filled_text", "")
-            processed_text = postprocessor.format_output(filled_text, {})
+            item_id = result.get("id")
+            original_text = original_texts.get(item_id, "")
+            
+            # Extract the gaps choices
+            gaps_data = result.get("gaps", [])
+            fills = {}
+            for g in gaps_data:
+                # Bielik returns 'index' and 'choice'
+                if 'index' in g and 'choice' in g:
+                    fills[g['index']] = g['choice']
+            
+            # 3. Reconstruct the FULL text using original text + fills
+            # We ignore result['filled_text'] because it's based on the optimized (short) text
+            reconstructed_text = postprocessor.apply_fills(original_text, fills)
+            
+            # Apply additional post-processing (formatting)
+            final_text = postprocessor.format_output(reconstructed_text, {})
             
             # Return the full result with processed text
             processed_result = {
-                "id": result.get("id"),
+                "id": item_id,
                 "status": result.get("status"),
-                "filled_text": processed_text,
-                "gaps": result.get("gaps", [])
+                "filled_text": final_text,
+                "gaps": gaps_data
             }
             processed_items.append(processed_result)
         

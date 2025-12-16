@@ -5,11 +5,12 @@ from typing import List, Dict, Any
 
 class GapContext:
     """Represents a gap with its surrounding context."""
-    def __init__(self, index: int, marker: str, text: str, context: str, char_position: int):
+    def __init__(self, index: int, marker: str, text: str, context: str, context_with_marker: str, char_position: int):
         self.index = index
         self.marker = marker
         self.text = text  # Full text with gaps
-        self.context = context  # Context around the gap (e.g., "Posiada ___ zawieszenie")
+        self.context = context  # Context with marker replaced by ___
+        self.context_with_marker = context_with_marker # Context with original [GAP:n] marker
         self.char_position = char_position
     
     def to_dict(self) -> Dict[str, Any]:
@@ -65,19 +66,39 @@ def extract_gaps(text: str, context_window: int = 30) -> List[GapContext]:
             else:
                 break
         
-        # Context: replace [GAP:n] with underscore
-        context = text[start:end].replace(marker, "___")
+        # Context: replace [GAP:n] with underscore for display
+        raw_context = text[start:end]
+        context = raw_context.replace(marker, "___")
+        context_with_marker = raw_context.strip()
         
         gap = GapContext(
             index=index,
             marker=marker,
             text=text,
             context=context.strip(),
+            context_with_marker=context_with_marker,
             char_position=pos
         )
         gaps.append(gap)
     
     return sorted(gaps, key=lambda g: g.index)
+
+def create_optimized_text(gaps: List[GapContext]) -> str:
+    """
+    Creates an optimized prompt text containing only the contexts around gaps.
+    This reduces token usage and focuses the model on the local context.
+    
+    Args:
+        gaps: List of GapContext objects
+        
+    Returns:
+        A single string with all gap contexts separated by newlines.
+    """
+    lines = []
+    for gap in gaps:
+        # We present each gap context on a new line
+        lines.append(gap.context_with_marker)
+    return "\n".join(lines)
 
 def get_gap_for_bielik(text: str, gap_index: int, context_window: int = 40) -> str:
     """
