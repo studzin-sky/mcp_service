@@ -1,0 +1,16 @@
+{
+  "domain": "cars",
+  "model": "bielik-1.5b",
+  "items": [
+    {
+      "id": "test1",
+      "text_with_gaps": "Sprzedam [GAP:1] Volkswagen Golf w kolorze [GAP:2]."
+    }
+  ],
+  "options": {
+    "language": "pl",
+    "temperature": 0.7,
+    "max_new_tokens": 300,
+    "top_n_per_gap": 2
+  }
+}
