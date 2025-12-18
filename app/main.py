@@ -1,273 +1,129 @@
-"""
-MCP Service - Model Context Protocol middleware
-
-Orchestrates preprocessing, guardrails, and postprocessing for text enhancement.
-Acts as central hub between bielik_app_service and clients.
-
-Flow:
-1. Client sends description with gaps [GAP:n]
-2. Preprocessor extracts gap context, normalizes text
-3. Guardrails validates input structure
-4. Bielik model generates filled text
-5. Postprocessor fixes JSON, extracts alternatives
-6. Guardrails validates output quality
-7. Response with enhanced text, gaps, alternatives
-"""
-
+import os
 import time
 import requests
-import json
-import logging
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import JSONResponse
-from typing import Dict, Any, List
+from pydantic import BaseModel, ValidationError
+from dotenv import load_dotenv
 
-from logic.preprocessor import TextPreprocessor, preprocess_data
-from logic.guardrails import Guardrails, ValidationLevel, create_validation_report
-from logic.postprocessor import PostProcessor, create_final_output
-from logic.polish_grammar import fix_grammar_in_text
-from schemas import EnhancementRequestBody, EnhancedDescriptionResponse
+# Load environment variables from .env.local for development
+load_dotenv(".env.local")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Corrected: Import from local logic module
+from .logic import preprocessor, guardrails, postprocessor
+from .logic.gap_extractor import extract_gaps, build_multi_gap_prompt
+from .schemas import EnhancementRequestBody, EnhancedDescriptionResponse
 
 app = FastAPI(
     title="Model Context Protocol (MCP) Service",
-    description="Central preprocessing, guardrails, and postprocessing service for text enhancement",
-    version="2.0.0"
+    description="A central service to manage AI model interactions, including pre-processing, guardrails, and post-processing.",
+    version="1.0.0"
 )
 
-# Configuration
-BIELIK_APP_URL = "http://localhost:8001"  # Local for testing, will be docker service name in production
-BIELIK_ENDPOINT = "/infill"
-
-# Initialize components
-preprocessor = TextPreprocessor("cars")
-guardrails = Guardrails(ValidationLevel.NORMAL)
-postprocessor = PostProcessor()
-
+# Configuration - supports both Docker and local development
+BIELIK_APP_URL = os.getenv("BIELIK_APP_URL", "http://bielik_app_service:8000")
+MCP_PORT = int(os.getenv("MCP_PORT", 8001))
+MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
 
 @app.get("/")
 async def read_root():
-    """Service health and info endpoint"""
-    return {
-        "service": "MCP (Model Context Protocol)",
-        "version": "2.0.0",
-        "status": "ready",
-        "endpoints": {
-            "health": "/health",
-            "enhance": "/api/v1/enhance-description",
-            "batch_enhance": "/api/v1/batch-enhance"
-        }
-    }
-
+    return {"message": "Welcome to the MCP Service. This service acts as a middleman for AI model interactions."}
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "service": "MCP"
-    }
-
+    return {"status": "ok"}
 
 @app.post("/api/v1/enhance-description", response_model=EnhancedDescriptionResponse)
 async def enhance_description(body: EnhancementRequestBody):
     """
-    Main enhancement endpoint.
-    
-    Flow:
-    1. Preprocess: Normalize, extract gaps, prepare context
-    2. Call Bielik: Send to model for gap-filling
-    3. Postprocess: Parse JSON, fix formatting
-    4. Grammar: Apply Polish case corrections
-    5. Guardrails: Validate output quality
-    
-    Returns:
-        Enhanced description with gaps, alternatives, metadata
+    This endpoint orchestrates the gap-filling by:
+    1. Extracting gap context from the text
+    2. Forwarding to Bielik infill endpoint
+    3. Applying MCP post-processing
     """
     start_time = time.time()
     
     try:
-        # Step 1: Preprocess
-        logger.info(f"[MCP] Preprocessing domain={body.domain}")
+        # 1. Store original texts for reconstruction later
+        original_texts = {item.id: item.text_with_gaps for item in body.items}
         
-        preprocessed = preprocess_data(
-            {
-                "description": body.data.get("description", ""),
-                "metadata": body.data.get("metadata", {})
-            },
-            domain=body.domain
-        )
+        # 2. Preprocess: Optimize text (reduce to contexts)
+        # This modifies 'body' in place or returns modified object
+        # We need to be careful with Pydantic models. 
+        # model_dump() creates a dict, let's work with that or modify body items directly.
+        # preprocessor.preprocess_data modifies the Pydantic model in place if it can, or returns it.
+        processed_body = preprocessor.preprocess_data(body, {})
         
-        normalized_text = preprocessed["normalized_description"]
-        gaps_info = preprocessed["gaps"]
-        model_context = preprocessed["model_context"]
+        # Forward the request to Bielik infill endpoint with OPTIMIZED texts
+        # We split the request into individual items to ensure atomic processing and avoid timeouts
+        bielik_results = []
         
-        logger.info(f"[MCP] Found {len(gaps_info)} gaps")
+        # processed_body is a Pydantic model (EnhancementRequestBody)
+        base_request_dict = processed_body.model_dump()
+        items_list = processed_body.items # List of InfillItem objects
         
-        # Step 2: Call Bielik service
-        logger.info(f"[MCP] Calling Bielik service for text generation")
-        
-        bielik_request = {
-            "description": normalized_text,
-            "domain": body.domain,
-            "model": body.model if hasattr(body, 'model') else "bielik",
-            "compare": False
-        }
-        
-        try:
-            response = requests.post(
-                f"{BIELIK_APP_URL}{BIELIK_ENDPOINT}",
-                json=bielik_request,
-                timeout=60
+        for item in items_list:
+            # Create a single-item request payload
+            # We copy the base request structure but replace 'items' with just the current item
+            single_item_payload = base_request_dict.copy()
+            single_item_payload["items"] = [item.model_dump()]
+            
+            print(f"MCP: Sending item {item.id} to Bielik...")
+            
+            # Send single item request
+            http_response = requests.post(
+                f"{BIELIK_APP_URL}/infill",
+                json=single_item_payload
             )
-            response.raise_for_status()
-            bielik_result = response.json()
-            generated = bielik_result.get("result", "")
+            http_response.raise_for_status()
+            response_data = http_response.json()
             
-            logger.info(f"[MCP] Bielik returned {len(generated)} chars")
+            # Aggregate results
+            if "results" in response_data:
+                bielik_results.extend(response_data["results"])
+
+        # Original bulk logic removed in favor of loop above
+        
+        # Apply MCP post-processing if needed
+        processed_items = []
+        for result in bielik_results:
+            item_id = result.get("id")
+            original_text = original_texts.get(item_id, "")
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"[MCP] Bielik service error: {e}")
-            raise HTTPException(status_code=503, detail=f"Text generation service unavailable: {str(e)}")
+            # Extract the gaps choices
+            gaps_data = result.get("gaps", [])
+            fills = {}
+            for g in gaps_data:
+                # Bielik returns 'index' and 'choice'
+                if 'index' in g and 'choice' in g:
+                    fills[g['index']] = g['choice']
+            
+            # 3. Reconstruct the FULL text using original text + fills
+            # We ignore result['filled_text'] because it's based on the optimized (short) text
+            reconstructed_text = postprocessor.apply_fills(original_text, fills)
+            
+            # Apply additional post-processing (formatting)
+            final_text = postprocessor.format_output(reconstructed_text, {})
+            
+            # Return the full result with processed text
+            processed_result = {
+                "id": item_id,
+                "status": result.get("status"),
+                "filled_text": final_text,
+                "gaps": gaps_data
+            }
+            processed_items.append(processed_result)
         
-        # Step 3: Postprocess
-        logger.info(f"[MCP] Postprocessing output")
-        
-        postprocessed = postprocessor.process(
-            raw_output=generated,
-            original_description=normalized_text,
-            gaps_info=gaps_info
-        )
-        
-        enhanced_text = postprocessed.get("enhanced_description", "")
-        gaps_filled = postprocessed.get("gaps", [])
-        alternatives = postprocessed.get("alternatives", {})
-        
-        # Step 4: Grammar fixes (Polish)
-        logger.info(f"[MCP] Applying Polish grammar corrections")
-        
-        corrected_text, grammar_suggestions = fix_grammar_in_text(enhanced_text, gaps_filled)
-        
-        logger.info(f"[MCP] Applied {len(grammar_suggestions)} grammar fixes")
-        
-        # Step 5: Guardrails validation
-        logger.info(f"[MCP] Running validation guardrails")
-        
-        validation_data = {
-            "original_description": normalized_text,
-            "enhanced_description": corrected_text,
-            "gaps": gaps_filled,
-            "alternatives": alternatives,
-            "domain": body.domain
-        }
-        
-        is_valid, validation_report = guardrails.validate_all(validation_data, body.domain)
-        
-        if not is_valid and guardrails.level == ValidationLevel.STRICT:
-            logger.warning(f"[MCP] Validation failed: {validation_report['errors']}")
-            raise HTTPException(status_code=422, detail=f"Output validation failed: {validation_report['errors']}")
-        
-        if validation_report.get("warnings"):
-            logger.info(f"[MCP] Validation warnings: {validation_report['warnings']}")
-        
-        # Build response
-        generation_time = time.time() - start_time
-        
-        logger.info(f"[MCP] Complete in {generation_time:.2f}s")
+        processing_time_ms = (time.time() - start_time) * 1000
         
         return EnhancedDescriptionResponse(
-            description=corrected_text,
-            original=normalized_text,
-            gaps=gaps_filled,
-            alternatives=alternatives,
-            model_used=body.model if hasattr(body, 'model') else "bielik-1.5b",
-            generation_time=round(generation_time, 2),
-            validation={
-                "valid": is_valid,
-                "errors": validation_report.get("errors", []),
-                "warnings": validation_report.get("warnings", [])
-            },
-            grammar_suggestions=grammar_suggestions
+            domain=body.domain,
+            model=body.model,
+            items=processed_items,
+            processing_time_ms=processing_time_ms,
+            status="success"
         )
-    
-    except HTTPException:
-        raise
+        
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=503, detail=f"Could not connect to Bielik service: {str(e)}")
     except Exception as e:
-        logger.error(f"[MCP] Unexpected error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Enhancement failed: {str(e)}")
-
-
-@app.post("/api/v1/batch-enhance")
-async def batch_enhance(batch_data: Dict[str, Any]):
-    """
-    Batch enhancement endpoint for multiple descriptions.
-    
-    Request:
-    {
-        "items": [
-            {
-                "id": "1",
-                "description": "Fiat 500...",
-                "metadata": {...}
-            }
-        ],
-        "domain": "cars",
-        "model": "bielik",
-        "parallel": false
-    }
-    """
-    items = batch_data.get("items", [])
-    domain = batch_data.get("domain", "cars")
-    model = batch_data.get("model", "bielik")
-    
-    logger.info(f"[MCP] Batch enhancement: {len(items)} items")
-    
-    results = []
-    for item in items:
-        try:
-            request_body = EnhancementRequestBody(
-                domain=domain,
-                data={"description": item.get("description", ""), "metadata": item.get("metadata", {})},
-                model=model,
-                mcp_rules=batch_data.get("mcp_rules", {})
-            )
-            
-            response = await enhance_description(request_body)
-            results.append({
-                "id": item.get("id"),
-                "status": "success",
-                "data": response.model_dump()
-            })
-        except Exception as e:
-            results.append({
-                "id": item.get("id"),
-                "status": "failed",
-                "error": str(e)
-            })
-    
-    return {"batch_id": batch_data.get("batch_id"), "results": results}
-
-
-@app.post("/api/v1/validate")
-async def validate_enhancement(data: Dict[str, Any]):
-    """
-    Validate enhancement data without running full enhancement.
-    """
-    validation_report = create_validation_report(
-        original=data.get("original_description", ""),
-        enhanced=data.get("enhanced_description", ""),
-        gaps=data.get("gaps", []),
-        alternatives=data.get("alternatives", {}),
-        domain=data.get("domain", "cars")
-    )
-    
-    return validation_report
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
