@@ -1,7 +1,7 @@
 # mcp_service/app/logic/postprocessor.py
 
 from typing import List, Dict, Any
-from .gap_extractor import extract_gaps
+from logic.gap_extractor import extract_gaps
 
 def apply_fills(original_text: str, fills: Dict[int, str]) -> str:
     """

@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 # Corrected: Import from local logic module
-from .logic import preprocessor, guardrails, postprocessor
-from .logic.gap_extractor import extract_gaps, build_multi_gap_prompt
-from .schemas import EnhancementRequestBody, EnhancedDescriptionResponse
+from logic import preprocessor, guardrails, postprocessor
+from logic.gap_extractor import extract_gaps, build_multi_gap_prompt
+from schemas import EnhancementRequestBody, EnhancedDescriptionResponse
 
 app = FastAPI(
     title="Model Context Protocol (MCP) Service",
@@ -62,6 +62,35 @@ async def enhance_description(body: EnhancementRequestBody):
         items_list = processed_body.items # List of InfillItem objects
         
         for item in items_list:
+            # RAG Enhancement
+            try:
+                # Use text_with_gaps as query
+                rag_query = item.text_with_gaps[:200]
+                rag_service_url = os.getenv("RAG_SERVICE_URL", "http://localhost:8002")
+                
+                # print(f"MCP: Querying RAG for item {item.id}...")
+                rag_response = requests.post(
+                    f"{rag_service_url}/search",
+                    json={
+                        "domain": body.domain,
+                        "query": rag_query,
+                        "n_results": 2
+                    },
+                    timeout=2
+                )
+                if rag_response.status_code == 200:
+                    rag_data = rag_response.json()
+                    docs = rag_data.get("documents", [])
+                    if docs and docs[0]:
+                         context_text = "\n".join(docs[0])
+                         if item.attributes is None:
+                             item.attributes = {}
+                         item.attributes["RAG_Knowledge"] = context_text
+                         print(f"MCP: Added RAG context to item {item.id}")
+            except Exception as e:
+                # Silently fail RAG to not block main flow, but log it
+                print(f"MCP: RAG search failed: {e}")
+
             # Create a single-item request payload
             # We copy the base request structure but replace 'items' with just the current item
             single_item_payload = base_request_dict.copy()
