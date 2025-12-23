@@ -5,6 +5,7 @@
 ## Key Features
 
 *   **Smart Preprocessing:** Normalizes text and optimizes context for better model performance.
+*   **Prompt Engineering:** Constructs domain-specific prompts locally, integrating RAG context directly into the chat messages sent to the LLM.
 *   **Gap Management:** Detects and manages `[GAP:n]` markers and text placeholders.
 *   **Polish Grammar Correction:** Automatically fixes case agreements (declensions) for adjectives based on context.
 *   **Guardrails & Validation:** Ensures output quality, structure, and domain relevance.

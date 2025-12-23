@@ -74,7 +74,7 @@ async def enhance_description(body: EnhancementRequestBody):
                     json={
                         "domain": body.domain,
                         "query": rag_query,
-                        "n_results": 2
+                        "n_results": 1
                     },
                     timeout=2
                 )
@@ -82,14 +82,35 @@ async def enhance_description(body: EnhancementRequestBody):
                     rag_data = rag_response.json()
                     docs = rag_data.get("documents", [])
                     if docs and docs[0]:
-                         context_text = "\n".join(docs[0])
+                         # Limit context size for CPU-bound Bielik
+                         context_text = "\n".join(docs[0])[:500]
                          if item.attributes is None:
                              item.attributes = {}
                          item.attributes["RAG_Knowledge"] = context_text
-                         print(f"MCP: Added RAG context to item {item.id}")
+                         print(f"MCP: Added RAG context to item {item.id} (len={len(context_text)})")
             except Exception as e:
                 # Silently fail RAG to not block main flow, but log it
                 print(f"MCP: RAG search failed: {e}")
+
+            # 2.5 Construct Custom Prompt (MCP Logic)
+            system_prompt = (
+                "Jesteś ekspertem motoryzacyjnym i copywriterem. "
+                "Uzupełnij luki [GAP:n] w tekście. Wybierz pasujące, atrakcyjne słowa. "
+                "Zwróć tylko numerowaną listę samych uzupełnień. "
+                "Nie powtarzaj znaczników [GAP:n]."
+            )
+            
+            context_str = ""
+            rag_knowledge = item.attributes.get("RAG_Knowledge") if item.attributes else None
+            if rag_knowledge:
+                context_str = f"Wiedza pomocnicza:\n{rag_knowledge}\n\n"
+            
+            user_prompt = f"{context_str}Tekst ogłoszenia:\n{item.text_with_gaps}\n\nUzupełnienia (lista numerowana):"
+            
+            item.custom_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
 
             # Create a single-item request payload
             # We copy the base request structure but replace 'items' with just the current item
@@ -126,20 +147,35 @@ async def enhance_description(body: EnhancementRequestBody):
                 if 'index' in g and 'choice' in g:
                     fills[g['index']] = g['choice']
             
-            # 3. Reconstruct the FULL text using original text + fills
+            # Reconstruct the FULL text using original text + fills
             # We ignore result['filled_text'] because it's based on the optimized (short) text
             reconstructed_text = postprocessor.apply_fills(original_text, fills)
             
             # Apply additional post-processing (formatting)
             final_text = postprocessor.format_output(reconstructed_text, {})
             
+            # 4. Guardrails: Validate the result
+            guard = guardrails.Guardrails()
+            # Simple validation for now - check if gaps are still there
+            is_valid, report = guard.validate_all({
+                "original_description": original_text,
+                "enhanced_description": final_text,
+                "gaps": gaps_data,
+                "alternatives": {}
+            }, domain=body.domain)
+            
+            status = "ok" if is_valid else "warning"
+            
             # Return the full result with processed text
             processed_result = {
                 "id": item_id,
-                "status": result.get("status"),
+                "status": status,
                 "filled_text": final_text,
                 "gaps": gaps_data
             }
+            if not is_valid:
+                print(f"MCP: Guardrails found issues with item {item_id}: {report['errors']}")
+            
             processed_items.append(processed_result)
         
         processing_time_ms = (time.time() - start_time) * 1000
