@@ -1,8 +1,13 @@
 """Logic modules for MCP Service."""
 
-from logic import preprocessor
-from logic import guardrails
-from logic import postprocessor
-from logic import polish_grammar
+from . import preprocessor
+from . import guardrails
+from . import postprocessor
 
-__all__ = ["preprocessor", "guardrails", "postprocessor", "polish_grammar"]
+# Skip polish_grammar if spacy is not installed
+try:
+    from . import polish_grammar
+except ImportError:
+    pass
+
+__all__ = ["preprocessor", "guardrails", "postprocessor"]

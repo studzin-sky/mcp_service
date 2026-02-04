@@ -1,0 +1,15 @@
+# GBNF Grammar for Car Advertisement Gap Filling
+# Forces model to output COMPACT valid JSON with gap fills
+# No whitespace/newlines to minimize token count
+
+root ::= "{\"gaps\":[" gap-list "]}"
+
+gap-list ::= gap-item ("," gap-item)*
+
+gap-item ::= "{\"index\":" number ",\"choice\":\"" phrase "\"}"
+
+# Allow words with Polish characters, numbers, spaces (max 5 words)
+phrase ::= word (space word){0,4}
+word ::= [a-zA-ZżźćńółęąśŻŹĆŃÓŁĘĄŚ0-9.,%-]+
+space ::= " "
+number ::= [1-9][0-9]*
