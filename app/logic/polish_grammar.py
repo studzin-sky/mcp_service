@@ -1,269 +1,234 @@
 """
-Polish Grammar Module - Automatic case declension fixer
+Polish Grammar Module - Automatic case declension fixer using Spacy
 
-Fixes common Polish grammar mistakes by converting words to proper cases.
-Supports 7 Polish grammatical cases (declension).
-
-Cases:
-- Nominative (Mianownik): Base form
-- Genitive (Dopełniacz): Of, from
-- Dative (Celownik): To, for  
-- Accusative (Biernik): Direct object
-- Instrumental (Narzędnik): With, by
-- Locative (Miejscownik): In, at, about
-- Vocative (Wołacz): Addressing
+Fixes common Polish grammar mistakes by converting words to proper cases
+based on the surrounding context (prepositions, noun agreement, verb objects).
 """
 
-from typing import Tuple, Optional, List
+import spacy
 import re
+from typing import Tuple, Optional, List, Dict, Any
 
-# Common Polish adjectives and their case forms
+# Load Spacy model
+try:
+    nlp = spacy.load("pl_core_news_lg")
+    print("MCP: Loaded pl_core_news_lg for grammar fixing.")
+except Exception as e:
+    print(f"MCP: Warning - Could not load pl_core_news_lg: {e}")
+    print("MCP: Falling back to limited regex-based grammar fixing.")
+    nlp = None
+
+# Case mapping from Spacy morph features
+SPACY_CASE_MAP = {
+    "Nom": "nominative",
+    "Gen": "genitive",
+    "Dat": "dative",
+    "Acc": "accusative",
+    "Ins": "instrumental",
+    "Loc": "locative",
+    "Voc": "vocative"
+}
+
+# Inverse mapping
+CASE_TO_SPACY = {v: k for k, v in SPACY_CASE_MAP.items()}
+
+# Common prepositions and the cases they govern
+PREPOSITION_CASES = {
+    "w": "locative",
+    "we": "locative",
+    "na": "locative",
+    "o": "locative",
+    "po": "locative",
+    "przy": "locative",
+    "z": "instrumental",
+    "ze": "instrumental",
+    "bez": "genitive",
+    "do": "genitive",
+    "od": "genitive",
+    "dla": "genitive",
+    "przez": "accusative"
+}
+
+# Verbs that typically take Accusative objects in car ads
+VERB_ACCUSATIVE = {
+    "sprzedać", "sprzedam", "kupić", "kupię", "mieć", "ma", 
+    "posiadać", "posiada", "oferować", "oferuję", "ogłaszać", "ogłaszam"
+}
+
+# Expanded dictionary of common adjectives in car ads
 ADJECTIVE_CASES = {
-    # Colors - common in car ads
-    "czarny": {
-        "nominative": "czarny", "genitive": "czarnego", "dative": "czarnemu",
-        "accusative": "czarny", "instrumental": "czarnym", "locative": "czarnym", "vocative": "czarny"
-    },
-    "biały": {
-        "nominative": "biały", "genitive": "białego", "dative": "białemu",
-        "accusative": "biały", "instrumental": "białym", "locative": "białym", "vocative": "biały"
-    },
-    "czerwony": {
-        "nominative": "czerwony", "genitive": "czerwonego", "dative": "czerwonemu",
-        "accusative": "czerwony", "instrumental": "czerwonym", "locative": "czerwonym", "vocative": "czerwony"
-    },
-    "srebrny": {
-        "nominative": "srebrny", "genitive": "srebrnego", "dative": "srebremu",
-        "accusative": "srebrny", "instrumental": "srebrnym", "locative": "srebrnym", "vocative": "srebrny"
-    },
-    "szary": {
-        "nominative": "szary", "genitive": "szarego", "dative": "szaremu",
-        "accusative": "szary", "instrumental": "szarym", "locative": "szarym", "vocative": "szary"
-    },
-    "niebieski": {
-        "nominative": "niebieski", "genitive": "niebieskiego", "dative": "niebieskiemu",
-        "accusative": "niebieski", "instrumental": "niebieskim", "locative": "niebieskim", "vocative": "niebieski"
-    },
-    "zielony": {
-        "nominative": "zielony", "genitive": "zielonego", "dative": "zielonemu",
-        "accusative": "zielony", "instrumental": "zielonym", "locative": "zielonym", "vocative": "zielony"
-    },
-    "żółty": {
-        "nominative": "żółty", "genitive": "żółtego", "dative": "żółtemu",
-        "accusative": "żółty", "instrumental": "żółtym", "locative": "żółtym", "vocative": "żółty"
-    },
-    # Engine types
-    "benzynowy": {
-        "nominative": "benzynowy", "genitive": "benzynowego", "dative": "benzynowemu",
-        "accusative": "benzynowy", "instrumental": "benzynowym", "locative": "benzynowym", "vocative": "benzynowy"
-    },
-    "dieselowy": {
-        "nominative": "dieselowy", "genitive": "dieselowego", "dative": "dieselowemu",
-        "accusative": "dieselowy", "instrumental": "dieselowym", "locative": "dieselowym", "vocative": "dieselowy"
-    },
-    "hybrydowy": {
-        "nominative": "hybrydowy", "genitive": "hybrydowego", "dative": "hybrydowemu",
-        "accusative": "hybrydowy", "instrumental": "hybrydowym", "locative": "hybrydowym", "vocative": "hybrydowy"
-    },
-    # Condition adjectives
-    "zadbany": {
-        "nominative": "zadbany", "genitive": "zadbanego", "dative": "zadbånemu",
-        "accusative": "zadbany", "instrumental": "zadbany", "locative": "zadbany", "vocative": "zadbany"
-    },
-    "nowy": {
-        "nominative": "nowy", "genitive": "nowego", "dative": "nowemu",
-        "accusative": "nowy", "instrumental": "nowym", "locative": "nowym", "vocative": "nowy"
-    },
-    "stary": {
-        "nominative": "stary", "genitive": "starego", "dative": "staremu",
-        "accusative": "stary", "instrumental": "starym", "locative": "starym", "vocative": "stary"
-    },
-    "piękny": {
-        "nominative": "piękny", "genitive": "pięknego", "dative": "pięknemu",
-        "accusative": "piękny", "instrumental": "pięknym", "locative": "pięknym", "vocative": "piękny"
-    },
-}
-
-# Context patterns that indicate required cases
-CONTEXT_CASES = {
-    # Locative (Miejscownik) - "w", "na", "o" prepositions
-    r"w\s+\w+": "locative",  # "w kolorze"
-    r"na\s+\w+": "locative",  # "na dachu"
-    r"o\s+\w+": "locative",  # "o mocy"
-    
-    # Instrumental (Narzędnik) - "z", "ze" prepositions
-    r"z\s+\w+": "instrumental",  # "z silnikiem"
-    r"ze\s+\w+": "instrumental",
-    
-    # Accusative (Biernik) - Direct object, no preposition usually
-    r"ma\s+\w+": "accusative",  # "ma przebieg"
-    r"posiada\s+\w+": "accusative",  # "posiada wyposażenie"
-    
-    # Genitive (Dopełniacz) - "z", "od", "do" in possessive context
-    r"drzwi\s+\w+": "genitive",  # "drzwi samochodu"
+    "czarny": {"nominative": "czarny", "genitive": "czarnego", "dative": "czarnemu", "accusative": "czarny", "instrumental": "czarnym", "locative": "czarnym"},
+    "biały": {"nominative": "biały", "genitive": "białego", "dative": "białemu", "accusative": "biały", "instrumental": "białym", "locative": "białym"},
+    "czerwony": {"nominative": "czerwony", "genitive": "czerwonego", "dative": "czerwonemu", "accusative": "czerwony", "instrumental": "czerwonym", "locative": "czerwonym"},
+    "srebrny": {"nominative": "srebrny", "genitive": "srebrnego", "dative": "srebremu", "accusative": "srebrny", "instrumental": "srebrnym", "locative": "srebrnym"},
+    "szary": {"nominative": "szary", "genitive": "szarego", "dative": "szaremu", "accusative": "szary", "instrumental": "szarym", "locative": "szarym"},
+    "niebieski": {"nominative": "niebieski", "genitive": "niebieskiego", "dative": "niebieskiemu", "accusative": "niebieski", "instrumental": "niebieskim", "locative": "niebieskim"},
+    "zielony": {"nominative": "zielony", "genitive": "zielonego", "dative": "zielonemu", "accusative": "zielony", "instrumental": "zielonym", "locative": "zielonym"},
+    "granatowy": {"nominative": "granatowy", "genitive": "granatowego", "dative": "granatowemu", "accusative": "granatowy", "instrumental": "granatowym", "locative": "granatowym"},
+    "benzynowy": {"nominative": "benzynowy", "genitive": "benzynowego", "dative": "benzynowemu", "accusative": "benzynowy", "instrumental": "benzynowym", "locative": "benzynowym"},
+    "diesel": {"nominative": "diesel", "genitive": "diesla", "dative": "dieslowi", "accusative": "diesla", "instrumental": "dieslem", "locative": "dieslu"},
+    "elektryczny": {"nominative": "elektryczny", "genitive": "elektrycznego", "dative": "elektrycznemu", "accusative": "elektryczny", "instrumental": "elektrycznym", "locative": "elektrycznym"},
+    "hybrydowy": {"nominative": "hybrydowy", "genitive": "hybrydowego", "dative": "hybrydowemu", "accusative": "hybrydowy", "instrumental": "hybrydowym", "locative": "hybrydowym"},
+    "manualny": {"nominative": "manualny", "genitive": "manualnego", "dative": "manualnemu", "accusative": "manualny", "instrumental": "manualnym", "locative": "manualnym"},
+    "automatyczny": {"nominative": "automatyczny", "genitive": "automatycznego", "dative": "automatycznemu", "accusative": "automatyczny", "instrumental": "automatycznym", "locative": "automatycznym"},
+    "zadbany": {"nominative": "zadbany", "genitive": "zadbanego", "dative": "zadbanemu", "accusative": "zadbany", "instrumental": "zadbanym", "locative": "zadbanym"},
+    "dobry": {"nominative": "dobry", "genitive": "dobrego", "dative": "dobremu", "accusative": "dobry", "instrumental": "dobrym", "locative": "dobrym"},
+    "idealny": {"nominative": "idealny", "genitive": "idealnego", "dative": "idealnemu", "accusative": "idealny", "instrumental": "idealnym", "locative": "idealnym"},
+    "pierwszy": {"nominative": "pierwszy", "genitive": "pierwszego", "dative": "pierwszemu", "accusative": "pierwszy", "instrumental": "pierwszym", "locative": "pierwszym"},
+    "oryginalny": {"nominative": "oryginalny", "genitive": "oryginalnego", "dative": "oryginalnemu", "accusative": "oryginalny", "instrumental": "oryginalnym", "locative": "oryginalnym"},
+    "bogaty": {"nominative": "bogaty", "genitive": "bogatego", "dative": "bogatemu", "accusative": "bogaty", "instrumental": "bogatym", "locative": "bogatym"},
+    "używany": {"nominative": "używany", "genitive": "używanego", "dative": "używanemu", "accusative": "używany", "instrumental": "używanym", "locative": "używanym"},
+    "niski": {"nominative": "niski", "genitive": "niskiego", "dative": "niskiemu", "accusative": "niski", "instrumental": "niskim", "locative": "niskim"}
 }
 
 
-def detect_required_case(text: str, gap_position: int) -> Optional[str]:
-    """
-    Detect the grammatical case required for a gap based on surrounding context.
-    
-    Args:
-        text: Full text with gaps
-        gap_position: Position of the gap in text
+def convert_to_case(word: str, target_case: str, pos: str = "ADJ") -> str:
+    """Look up word and return inflected form."""
+    if not word or not target_case:
+        return word
         
-    Returns:
-        Case name (nominative, genitive, etc.) or None if unclear
-    """
-    # Get context around gap (50 chars before and after)
-    start = max(0, gap_position - 50)
-    end = min(len(text), gap_position + 50)
-    context = text[start:end].lower()
-    
-    # Check patterns
-    for pattern, case in CONTEXT_CASES.items():
-        if re.search(pattern, context):
-            return case
-    
-    return None
-
-
-def convert_to_case(word: str, target_case: str) -> str:
-    """
-    Convert a Polish adjective to the target case.
-    
-    Args:
-        word: Word to convert (should be in nominative or base form)
-        target_case: Target case (nominative, genitive, dative, accusative, instrumental, locative, vocative)
-        
-    Returns:
-        Word in the target case, or original word if not found
-    """
     word_lower = word.lower()
     
-    # Try exact match
+    # Check dictionary
     if word_lower in ADJECTIVE_CASES:
-        cases = ADJECTIVE_CASES[word_lower]
-        result = cases.get(target_case, word)
-        # Preserve original capitalization
-        if word[0].isupper():
-            result = result.capitalize()
-        return result
+        return ADJECTIVE_CASES[word_lower].get(target_case, word)
     
-    # Try to find by checking nominative form
-    for base_word, cases in ADJECTIVE_CASES.items():
-        if cases.get("nominative") == word_lower:
-            result = cases.get(target_case, word)
-            if word[0].isupper():
-                result = result.capitalize()
-            return result
+    # Only apply heuristics to Adjectives
+    if pos == "ADJ":
+        if target_case in ["locative", "instrumental"]:
+            if word_lower.endswith("a"): return word[:-1] + "ej"
+            if word_lower.endswith("y"): return word + "m"
+            if word_lower.endswith("i"): return word + "m"
+        elif target_case == "genitive":
+            if word_lower.endswith("y"): return word[:-1] + "ego"
+            if word_lower.endswith("i"): return word[:-1] + "ego"
     
-    # Word not in database, return as-is
     return word
 
 
-def fix_adjective_case(text: str, adjective: str, required_case: str) -> str:
-    """
-    Fix a single adjective's case in the text.
-    
-    Args:
-        text: Text containing the adjective
-        adjective: The adjective to fix
-        required_case: The required case
+def analyze_context_and_fix(context_text: str, choice: str) -> str:
+    """Analyzes context before gap and inflects the choice."""
+    if not nlp or not context_text or not choice:
+        return choice
         
-    Returns:
-        Text with corrected adjective
-    """
-    if not required_case or required_case == "nominative":
-        return text
+    # Analyze the CHOICE word first
+    choice_doc = nlp(choice)
+    if not choice_doc or len(choice_doc) == 0:
+        return choice
     
-    correct_form = convert_to_case(adjective, required_case)
+    choice_token = choice_doc[0]
+    choice_pos = choice_token.pos_
+    choice_morph = choice_token.morph
     
-    # Replace (case-insensitive, but preserve case pattern)
-    pattern = re.compile(re.escape(adjective), re.IGNORECASE)
-    return pattern.sub(correct_form, text, count=1)
-
-
-def analyze_gap_context(text: str, gap_index: int) -> dict:
-    """
-    Analyze the context around a gap to understand what kind of word should fill it.
-    
-    Returns:
-        {
-            "position": "after_noun",
-            "required_case": "locative",
-            "preposition": "w",
-            "noun": "kolorze",
-            "confidence": 0.95
-        }
-    """
-    # Find the gap marker in text
-    gap_marker = f"[GAP:{gap_index}]"
-    pos = text.find(gap_marker)
-    
-    if pos == -1:
-        return {"position": "unknown", "required_case": None}
-    
-    # Get context before and after
-    before = text[max(0, pos - 30):pos].strip()
-    after = text[pos + len(gap_marker):min(len(text), pos + 30)].strip()
-    
-    # Detect case
-    required_case = detect_required_case(text, pos)
-    
-    return {
-        "position": before,
-        "required_case": required_case,
-        "after": after,
-        "full_context": before + " [GAP:" + str(gap_index) + "] " + after
-    }
-
-
-def fix_grammar_in_text(text: str, gaps_info: List[dict]) -> Tuple[str, List[dict]]:
-    """
-    Analyze gaps and suggest grammar fixes.
-    
-    Args:
-        text: Text with [GAP:n] markers
-        gaps_info: List of gap dicts with "index", "choice", etc.
+    # Analyze context
+    doc = nlp(context_text[-100:].strip())
+    if not doc or len(doc) == 0:
+        return choice
         
-    Returns:
-        (corrected_text, fix_suggestions)
-    """
-    corrected_text = text
-    suggestions = []
-    
-    for gap_info in gaps_info:
-        gap_index = gap_info.get("index", 0)
-        choice = gap_info.get("choice", "")
-        
-        # Analyze context
-        context = analyze_gap_context(text, gap_index)
-        required_case = context.get("required_case")
-        
-        if required_case and required_case != "nominative":
-            # Try to fix the case
-            corrected_word = convert_to_case(choice, required_case)
+    # Find last significant token (ignoring punctuation/space)
+    last_token = None
+    for i in range(len(doc)-1, -1, -1):
+        if doc[i].pos_ not in ["PUNCT", "SPACE"]:
+            last_token = doc[i]
+            break
             
-            if corrected_word != choice:
-                suggestions.append({
-                    "gap_index": gap_index,
-                    "original": choice,
-                    "corrected": corrected_word,
-                    "case": required_case,
-                    "context": context.get("full_context")
-                })
-                
-                # Replace in text (replace [GAP:n] with corrected word)
-                gap_marker = f"[GAP:{gap_index}]"
-                corrected_text = corrected_text.replace(gap_marker, corrected_word)
-            else:
-                # Just replace marker with choice
-                gap_marker = f"[GAP:{gap_index}]"
-                corrected_text = corrected_text.replace(gap_marker, choice)
-        else:
-            # Just replace marker with choice
-            gap_marker = f"[GAP:{gap_index}]"
-            corrected_text = corrected_text.replace(gap_marker, choice)
+    if not last_token:
+        return choice
+        
+    target_case = None
     
-    return corrected_text, suggestions
+    # 1. Preposition
+    if last_token.pos_ == "ADP":
+        target_case = PREPOSITION_CASES.get(last_token.lemma_.lower())
+        
+    # 2. Noun Agreement
+    elif last_token.pos_ == "NOUN":
+        case_feature = last_token.morph.get("Case")
+        if case_feature:
+            target_case = SPACY_CASE_MAP.get(case_feature[0])
+            
+    # 3. Verb Governance
+    elif last_token.pos_ == "VERB":
+        lemma = last_token.lemma_.lower()
+        if lemma in VERB_ACCUSATIVE:
+            target_case = "accusative"
+            
+    if target_case:
+        # CHECK IF ALREADY IN TARGET CASE
+        current_cases = choice_morph.get("Case")
+        target_spacy_case = CASE_TO_SPACY.get(target_case)
+        
+        if current_cases and target_spacy_case in current_cases:
+            # Already in correct case, don't touch it!
+            # (e.g. "do jazdy" -> "jazdy" is already Genitive)
+            return choice
+
+        inflected = convert_to_case(choice, target_case, pos=choice_pos)
+        # Preserve capitalization
+        if choice and choice[0].isupper():
+            inflected = inflected.capitalize()
+        return inflected
+        
+    return choice
+
+
+def fix_grammar_in_text(text: str, gaps_info: List[Any]) -> Tuple[str, List[Dict[str, Any]]]:
+    """Replaces [GAP:n] markers with inflected choices."""
+    if not nlp:
+        print("MCP: Skipping grammar fix (Spacy model not loaded)")
+        return text, gaps_info
+        
+    # Robustly map index -> choice (handle both dicts and objects)
+    gap_map = {}
+    for g in gaps_info:
+        try:
+            if isinstance(g, dict):
+                idx = g.get('index')
+                choice = g.get('choice', '')
+            else:
+                idx = getattr(g, 'index', None)
+                choice = getattr(g, 'choice', '')
+            if idx is not None:
+                gap_map[str(idx)] = choice
+        except Exception:
+            continue
+
+    gap_pattern = re.compile(r"\[GAP:(\d+)\]")
+    current_pos = 0
+    result_parts = []
+    updated_gaps = []
+    
+    matches = list(gap_pattern.finditer(text))
+    print(f"MCP: Found {len(matches)} gaps in text for grammar fixing.")
+
+    for match in matches:
+        gap_id_str = match.group(1)
+        start, end = match.span()
+        
+        # Add text before gap
+        result_parts.append(text[current_pos:start])
+        
+        # Get choice
+        choice = gap_map.get(gap_id_str, "")
+        
+        # Context is everything we have built so far
+        full_context = "".join(result_parts)
+        
+        # Fix inflection
+        corrected = analyze_context_and_fix(full_context, choice)
+        
+        result_parts.append(corrected)
+        current_pos = end
+        
+        # Track for metadata
+        updated_gaps.append({
+            "index": int(gap_id_str),
+            "original_choice": choice,
+            "choice": corrected
+        })
+        
+    # Add remaining text
+    result_parts.append(text[current_pos:])
+    final_text = "".join(result_parts)
+    
+    return final_text, updated_gaps

@@ -38,7 +38,7 @@ class MCPConfig:
     
     # Content constraints
     MIN_DESCRIPTION_LENGTH = int(os.getenv("MIN_DESC_LENGTH", "50"))
-    MAX_DESCRIPTION_LENGTH = int(os.getenv("MAX_DESC_LENGTH", "2000"))
+    MAX_DESCRIPTION_LENGTH = int(os.getenv("MAX_DESC_LENGTH", "30000"))  # Increased for bulk ads
     MAX_GAP_FILL_LENGTH = int(os.getenv("MAX_GAP_FILL", "100"))
     
     # Processing

@@ -14,6 +14,7 @@ import os
 import time
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
@@ -29,6 +30,15 @@ app = FastAPI(
     title="Model Context Protocol (MCP) Service",
     description="Middleware for AI model interactions with validation and guardrails.",
     version="3.0.0"
+)
+
+# Enable CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Configuration
