@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 from typing import List
-from .gap_extractor import extract_gaps, create_optimized_text
+from logic.gap_extractor import extract_gaps, create_optimized_text
 
 def optimize_item_text(text: str) -> str:
     """

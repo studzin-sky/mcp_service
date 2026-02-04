@@ -5,6 +5,7 @@ class InfillItem(BaseModel):
     id: str = Field(..., description="Unique identifier for the item")
     text_with_gaps: str = Field(..., description="Text with [GAP:n] markers")
     attributes: Dict[str, Any] = Field(default_factory=dict, description="Optional context attributes (e.g. make, model)")
+    custom_messages: List[Dict[str, str]] = Field(default=None, description="Optional pre-built chat messages")
 
 class InfillOptions(BaseModel):
     language: str = Field(default="pl", description="Language code (pl/en)")

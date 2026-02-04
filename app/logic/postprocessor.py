@@ -1,7 +1,7 @@
 # mcp_service/app/logic/postprocessor.py
 
 from typing import List, Dict, Any
-from .gap_extractor import extract_gaps
+from logic.gap_extractor import extract_gaps
 
 def apply_fills(original_text: str, fills: Dict[int, str]) -> str:
     """
@@ -28,10 +28,16 @@ def apply_fills(original_text: str, fills: Dict[int, str]) -> str:
     
     for gap in sorted_gaps:
         if gap.index in fills:
+            # Clean the fill choice
+            fill_text = fills[gap.index]
+            # Remove [GAP:n] markers if present in the fill
+            import re
+            fill_text = re.sub(r'\[GAP:\d+\]', '', fill_text).strip()
+            
             # gap.char_position is the start of the marker
             start = gap.char_position
             end = start + len(gap.marker)
-            result = result[:start] + fills[gap.index] + result[end:]
+            result = result[:start] + fill_text + result[end:]
     
     return result
 
