@@ -254,7 +254,7 @@ async def enhance_description(body: EnhancementRequest):
                 is_valid, report = guard.validate_all({
                     "original_description": item.text_with_gaps,
                     "enhanced_description": filled_text,
-                    "gaps": gaps,
+                    "gaps": [{"index": g.index, "marker": g.marker} for g in gaps],
                     "alternatives": alternatives
                 }, domain=body.domain)
                 
