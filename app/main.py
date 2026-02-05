@@ -5,7 +5,7 @@ Gateway service that:
 1. Validates incoming requests
 2. Detects gaps in text locally
 3. Builds domain-specific prompts
-4. Calls Bielik /generate for inference (pure GPU)
+4. Calls Bielik /chat for inference (pure GPU)
 5. Parses & reconstructs responses
 6. Applies guardrails
 
@@ -27,7 +27,6 @@ load_dotenv(".env.local")
 # Import our new components
 from app.logic.bielik_client import BielikClient
 from app.logic.infill_utils import detect_gaps, parse_infill_response, apply_fills
-from app.domains.cars.prompts import create_infill_prompt
 from app.logic import guardrails
 
 # Import polish_grammar safely (requires spacy)
@@ -193,28 +192,44 @@ async def enhance_description(body: EnhancementRequest):
             
             print(f"MCP: Detected {len(gaps)} gaps in item {item.id}")
             
-            # Step 2b: Build domain-specific prompt
-            prompt = create_infill_prompt(
-                text_with_gaps=item.text_with_gaps,
-                gaps=gaps,
-                attributes=item.attributes
+            # Step 2b: Build domain-specific chat messages (minimal prompt for context window)
+            system_message = (
+                "Jesteś asystentem sprzedaży samochodów. "
+                "Dla każdej luki [GAP:n] wybierz jedno słowo. "
+                "Wypisz tylko listę: 1. słowo\\n2. słowo\\n..."
             )
-            print(f"MCP: Built prompt for item {item.id}")
             
-            # Step 2c: Call Bielik /generate
-            print(f"MCP: Calling Bielik /generate for item {item.id}...")
-            raw_output = await bielik_client.generate(
+            context_str = ""
+            if item.attributes:
+                attr_list = [f"{k}: {v}" for k, v in item.attributes.items() if v]
+                if attr_list:
+                    context_str = "Pojazd: " + ", ".join(attr_list) + "\n\n"
+            
+            user_message = f"{context_str}Tekst:\n{item.text_with_gaps}\n\nLista:"
+            
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ]
+            
+            print(f"MCP: Built chat prompt for item {item.id}")
+            print(f"DEBUG: MESSAGES SENT TO BIELIK:\n{messages}\n")
+            
+            # Step 2c: Call Bielik /chat (uses proper chat template)
+            print(f"MCP: Calling Bielik /chat for item {item.id}...")
+            raw_output = await bielik_client.chat(
                 model=body.model,
-                prompt=prompt,
+                messages=messages,
                 max_tokens=body.options.max_new_tokens,
                 temperature=body.options.temperature,
                 top_p=0.9
             )
             print(f"MCP: Bielik returned {len(raw_output)} chars for item {item.id}")
-            print(f"MCP: Raw output: {raw_output[:200]}...")
+            print(f"DEBUG: FULL RAW OUTPUT FROM BIELIK:\n{raw_output}\n")
             
             # Step 2d: Parse response
             parsed = parse_infill_response(raw_output)
+            print(f"DEBUG: PARSED RESPONSE:\n{parsed}\n")
             if not parsed or "gaps" not in parsed:
                 print(f"MCP: Failed to parse response for item {item.id}")
                 raise Exception("Failed to parse Bielik response")
@@ -227,10 +242,12 @@ async def enhance_description(body: EnhancementRequest):
                 if idx and choice:
                     alternatives[idx] = choice
             
+            print(f"DEBUG: EXTRACTED ALTERNATIVES:\n{alternatives}\n")
             print(f"MCP: Parsed {len(alternatives)} alternatives for item {item.id}")
             
             # Step 2e: Reconstruct text
             filled_text = apply_fills(item.text_with_gaps, gaps, alternatives)
+            print(f"DEBUG: FINAL FILLED TEXT:\n{filled_text}\n")
             print(f"MCP: Reconstructed text for item {item.id}")
             
             # Step 2f: Apply grammar fix (optional, requires spacy)

@@ -114,8 +114,14 @@ def parse_infill_response(raw_output: str) -> Optional[dict]:
         for match in matches:
             index = int(match.group(1))
             choice = match.group(2).strip()
-            # Remove any trailing punctuation like periods if they look like sentence enders, 
-            # but usually single words are clean.
+            
+            # Remove echoed gap markers (e.g., "[GAP:1] word" -> "word")
+            choice = re.sub(r'\[GAP:\d+\]\s*', '', choice).strip()
+            
+            # Remove markdown formatting (**word** -> word, *word* -> word)
+            choice = re.sub(r'\*\*([^\*]+)\*\*', r'\1', choice)
+            choice = re.sub(r'\*([^\*]+)\*', r'\1', choice)
+            
             gaps_list.append({
                 "index": index,
                 "choice": choice
