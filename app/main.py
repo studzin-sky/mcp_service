@@ -1,18 +1,20 @@
 """
 MCP Service - Model Context Protocol
 =====================================
-A lightweight middleware that:
+Gateway service that:
 1. Validates incoming requests
-2. Forwards to Bielik App Service (bulk mode with GBNF grammar)
-3. Applies guardrails to responses
-4. Returns validated results
+2. Detects gaps in text locally
+3. Builds domain-specific prompts
+4. Calls Bielik /chat for inference (pure GPU)
+5. Parses & reconstructs responses
+6. Applies guardrails
 
-This is a passthrough service - Bielik does the heavy LLM work.
+Bielik now only does inference. MCP handles all business logic.
 """
 
 import os
 import time
-import requests
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -22,20 +24,27 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv(".env.local")
 
-# Import guardrails for post-processing validation
-from logic import guardrails
-from logic import polish_grammar
+# Import our new components
+from app.logic.bielik_client import BielikClient
+from app.logic.infill_utils import detect_gaps, parse_infill_response, apply_fills
+from app.logic import guardrails
+
+# Import polish_grammar safely (requires spacy)
+try:
+    from app.logic import polish_grammar
+except ImportError:
+    polish_grammar = None
 
 app = FastAPI(
     title="Model Context Protocol (MCP) Service",
-    description="Middleware for AI model interactions with validation and guardrails.",
-    version="3.0.0"
+    description="Gateway for AI model interactions with validation and guardrails.",
+    version="2.0.0"
 )
 
 # Enable CORS for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,7 +53,10 @@ app.add_middleware(
 # Configuration
 BIELIK_APP_URL = os.getenv("BIELIK_APP_URL", "http://bielik_app_service:8000")
 MCP_PORT = int(os.getenv("MCP_PORT", 8001))
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 600))  # 10 minutes for bulk requests (GPU may compile on first run)
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 600))
+
+# Initialize Bielik client
+bielik_client = BielikClient(base_url=BIELIK_APP_URL, timeout=REQUEST_TIMEOUT)
 
 
 # ============== Schemas ==============
@@ -64,7 +76,7 @@ class EnhancementOptions(BaseModel):
 
 class EnhancementRequest(BaseModel):
     domain: str = "cars"
-    model: str = "bielik-1.5b-gguf"
+    model: str = "bielik-1.5b-transformer"  # GPU-only models
     items: List[EnhancementItem]
     options: EnhancementOptions = Field(default_factory=EnhancementOptions)
 
@@ -123,13 +135,15 @@ async def health():
 @app.post("/api/v1/enhance-description", response_model=EnhancementResponse)
 async def enhance_description(body: EnhancementRequest):
     """
-    Main endpoint for gap-filling car advertisements.
+    Main endpoint for gap-filling car advertisements using Bielik GPU inference.
     
-    Flow:
-    1. Validate input (check gaps exist, domain valid)
-    2. Forward to Bielik in bulk mode (uses GBNF grammar for fast, structured output)
-    3. Apply guardrails (validate fills are appropriate)
-    4. Return processed results
+    New Flow (Phase 2):
+    1. Validate input (gaps exist, domain valid)
+    2. Detect gaps locally
+    3. For each item: build prompt → call Bielik /generate → parse response
+    4. Reconstruct text with filled gaps
+    5. Apply guardrails (already in MCP)
+    6. Return processed results
     """
     start_time = time.time()
     
@@ -140,7 +154,6 @@ async def enhance_description(body: EnhancementRequest):
     # ---- Step 1: Input Validation ----
     validated_items = []
     for item in body.items:
-        # Check if text has gaps
         has_gaps = "[GAP:" in item.text_with_gaps or "___" in item.text_with_gaps
         if not has_gaps:
             print(f"MCP: Warning - Item {item.id} has no gaps, will pass through unchanged")
@@ -155,108 +168,148 @@ async def enhance_description(body: EnhancementRequest):
             status="success"
         )
     
-    # ---- Step 2: Forward to Bielik (Bulk Mode) ----
-    bielik_payload = {
-        "domain": body.domain,
-        "model": body.model,
-        "items": [
-            {
-                "id": item.id,
-                "text_with_gaps": item.text_with_gaps,
-                "attributes": item.attributes or {}
-            }
-            for item in validated_items
-        ],
-        "options": {
-            "language": body.options.language,
-            "temperature": body.options.temperature,
-            "max_new_tokens": body.options.max_new_tokens,
-            "top_n_per_gap": body.options.top_n_per_gap,
-            "gap_notation": "auto"
-        }
-    }
-    
-    print(f"MCP: Sending bulk request to Bielik...")
-    
-    try:
-        bielik_response = requests.post(
-            f"{BIELIK_APP_URL}/infill",
-            json=bielik_payload,
-            timeout=REQUEST_TIMEOUT
-        )
-        
-        if bielik_response.status_code != 200:
-            print(f"MCP: Bielik error {bielik_response.status_code}: {bielik_response.text[:500]}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Bielik service error: {bielik_response.status_code}"
-            )
-        
-        bielik_data = bielik_response.json()
-        print(f"MCP: Bielik returned {len(bielik_data.get('results', []))} results")
-        
-    except requests.exceptions.Timeout:
-        print(f"MCP: Bielik request timed out after {REQUEST_TIMEOUT}s")
-        raise HTTPException(status_code=504, detail="Bielik service timeout")
-    except requests.exceptions.RequestException as e:
-        print(f"MCP: Bielik connection error: {e}")
-        raise HTTPException(status_code=503, detail=f"Cannot connect to Bielik: {e}")
-    
-    # ---- Step 3: Apply Guardrails ----
+    # ---- Step 2: Process each item ----
     processed_items = []
     guard = guardrails.Guardrails()
-    
-    # Map original texts for guardrail validation
     original_texts = {item.id: item.text_with_gaps for item in body.items}
     
-    for result in bielik_data.get("results", []):
-        item_id = result.get("id")
-        status = result.get("status", "error")
-        filled_text = result.get("filled_text")
-        gaps = result.get("gaps", [])
-        error = result.get("error")
-        
-        # ---- Step 2b: Apply Grammar Fix (New) ----
-        if status == "ok" and gaps:
-            original_text = original_texts.get(item_id, "")
-            if original_text:
-                try:
-                    # Fix grammar based on context (inflection)
-                    fixed_text, fixed_gaps = polish_grammar.fix_grammar_in_text(original_text, gaps)
-                    
-                    # Update if successful
-                    filled_text = fixed_text
-                    gaps = fixed_gaps
-                    print(f"MCP: Grammar fix applied for item {item_id}")
-                except Exception as e:
-                    print(f"MCP: Grammar fix failed for item {item_id}: {e}")
-        
-        # Apply guardrails if we have a successful fill
-        final_status = status
-        if status == "ok" and filled_text:
-            is_valid, report = guard.validate_all({
-                "original_description": original_texts.get(item_id, ""),
-                "enhanced_description": filled_text,
-                "gaps": gaps,
-                "alternatives": {}
-            }, domain=body.domain)
+    for item in validated_items:
+        try:
+            print(f"\nMCP: Processing item {item.id}...")
             
-            if not is_valid:
-                final_status = "warning"
-                print(f"MCP: Guardrails flagged item {item_id}: {report}")
-        
-        processed_items.append(ProcessedItem(
-            id=item_id,
-            status=final_status,
-            filled_text=filled_text,
-            gaps=[GapFill(**g) if isinstance(g, dict) else g for g in gaps],
-            error=error
-        ))
+            # Step 2a: Detect gaps
+            gaps = detect_gaps(item.text_with_gaps)
+            if not gaps:
+                print(f"MCP: No gaps found in item {item.id}")
+                processed_items.append(ProcessedItem(
+                    id=item.id,
+                    status="ok",
+                    filled_text=item.text_with_gaps,
+                    gaps=[],
+                    error=None
+                ))
+                continue
+            
+            print(f"MCP: Detected {len(gaps)} gaps in item {item.id}")
+            
+            # Step 2b: Build domain-specific chat messages (minimal prompt for context window)
+            system_message = (
+                "Jesteś asystentem sprzedaży samochodów. "
+                "Dla każdej luki [GAP:n] wybierz jedno słowo. "
+                "Wypisz tylko listę: 1. słowo\\n2. słowo\\n..."
+            )
+            
+            context_str = ""
+            if item.attributes:
+                attr_list = [f"{k}: {v}" for k, v in item.attributes.items() if v]
+                if attr_list:
+                    context_str = "Pojazd: " + ", ".join(attr_list) + "\n\n"
+            
+            user_message = f"{context_str}Tekst:\n{item.text_with_gaps}\n\nLista:"
+            
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ]
+            
+            print(f"MCP: Built chat prompt for item {item.id}")
+            print(f"DEBUG: MESSAGES SENT TO BIELIK:\n{messages}\n")
+            
+            # Step 2c: Call Bielik /chat (uses proper chat template)
+            print(f"MCP: Calling Bielik /chat for item {item.id}...")
+            raw_output = await bielik_client.chat(
+                model=body.model,
+                messages=messages,
+                max_tokens=body.options.max_new_tokens,
+                temperature=body.options.temperature,
+                top_p=0.9
+            )
+            print(f"MCP: Bielik returned {len(raw_output)} chars for item {item.id}")
+            print(f"DEBUG: FULL RAW OUTPUT FROM BIELIK:\n{raw_output}\n")
+            
+            # Step 2d: Parse response
+            parsed = parse_infill_response(raw_output)
+            print(f"DEBUG: PARSED RESPONSE:\n{parsed}\n")
+            if not parsed or "gaps" not in parsed:
+                print(f"MCP: Failed to parse response for item {item.id}")
+                raise Exception("Failed to parse Bielik response")
+            
+            # Extract alternatives from parsed response
+            alternatives = {}
+            for gap_entry in parsed.get("gaps", []):
+                idx = gap_entry.get("index")
+                choice = gap_entry.get("choice")
+                if idx and choice:
+                    alternatives[idx] = choice
+            
+            print(f"DEBUG: EXTRACTED ALTERNATIVES:\n{alternatives}\n")
+            print(f"MCP: Parsed {len(alternatives)} alternatives for item {item.id}")
+            
+            # Step 2e: Reconstruct text
+            filled_text = apply_fills(item.text_with_gaps, gaps, alternatives)
+            print(f"DEBUG: FINAL FILLED TEXT:\n{filled_text}\n")
+            print(f"MCP: Reconstructed text for item {item.id}")
+            
+            # Step 2f: Apply grammar fix (optional, requires spacy)
+            final_status = "ok"
+            if polish_grammar:
+                try:
+                    fixed_text, fixed_gaps = polish_grammar.fix_grammar_in_text(
+                        item.text_with_gaps,
+                        [{"index": g.index, "choice": alternatives.get(g.index)} for g in gaps]
+                    )
+                    filled_text = fixed_text
+                    print(f"MCP: Grammar fix applied for item {item.id}")
+                except Exception as e:
+                    print(f"MCP: Grammar fix failed for item {item.id}: {e}")
+            else:
+                print(f"MCP: Skipping grammar fix (spacy not installed)")
+            
+            
+            # Step 2g: Apply guardrails
+            if filled_text:
+                is_valid, report = guard.validate_all({
+                    "original_description": item.text_with_gaps,
+                    "enhanced_description": filled_text,
+                    "gaps": [{"index": g.index, "marker": g.marker} for g in gaps],
+                    "alternatives": alternatives
+                }, domain=body.domain)
+                
+                if not is_valid:
+                    final_status = "warning"
+                    print(f"MCP: Guardrails flagged item {item.id}: {report}")
+            
+            # Build response item
+            gap_fills = []
+            for gap in gaps:
+                gap_fills.append(GapFill(
+                    index=gap.index,
+                    marker=gap.marker,
+                    choice=alternatives.get(gap.index, ""),
+                    alternatives=[]
+                ))
+            
+            processed_items.append(ProcessedItem(
+                id=item.id,
+                status=final_status,
+                filled_text=filled_text,
+                gaps=gap_fills,
+                error=None
+            ))
+            
+        except Exception as e:
+            print(f"MCP: Error processing item {item.id}: {e}")
+            processed_items.append(ProcessedItem(
+                id=item.id,
+                status="error",
+                filled_text=None,
+                gaps=[],
+                error=str(e)
+            ))
     
-    # ---- Step 4: Return Response ----
+    # ---- Step 3: Return Response ----
     processing_time_ms = (time.time() - start_time) * 1000
     
-    # Determine overall status
     error_count = sum(1 for item in processed_items if item.status == "error")
     if error_count == len(processed_items):
         overall_status = "error"
