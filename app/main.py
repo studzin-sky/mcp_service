@@ -28,6 +28,9 @@ load_dotenv(".env.local")
 from app.logic.bielik_client import BielikClient
 from app.logic.infill_utils import detect_gaps, parse_infill_response, apply_fills
 from app.logic import guardrails
+from app.logic.prompt_strategy import choose_strategy, build_per_gap_prompts
+from app.logic.text_analyzer import TextAnalyzer
+from app.mcp.server import create_mcp_router
 
 # Import polish_grammar safely (requires spacy)
 try:
@@ -57,6 +60,13 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 600))
 
 # Initialize Bielik client
 bielik_client = BielikClient(base_url=BIELIK_APP_URL, timeout=REQUEST_TIMEOUT)
+
+# Initialize TextAnalyzer (for smart context extraction)
+text_analyzer = TextAnalyzer()
+
+# ============== Register MCP Protocol Router ==============
+mcp_router = create_mcp_router(bielik_client)
+app.include_router(mcp_router)
 
 
 # ============== Schemas ==============
@@ -191,59 +201,102 @@ async def enhance_description(body: EnhancementRequest):
                 continue
             
             print(f"MCP: Detected {len(gaps)} gaps in item {item.id}")
-            
-            # Step 2b: Build domain-specific chat messages (minimal prompt for context window)
-            system_message = (
-                "Jesteś asystentem sprzedaży samochodów. "
-                "Dla każdej luki [GAP:n] wybierz jedno słowo. "
-                "Wypisz tylko listę: 1. słowo\\n2. słowo\\n..."
-            )
-            
-            context_str = ""
-            if item.attributes:
-                attr_list = [f"{k}: {v}" for k, v in item.attributes.items() if v]
-                if attr_list:
-                    context_str = "Pojazd: " + ", ".join(attr_list) + "\n\n"
-            
-            user_message = f"{context_str}Tekst:\n{item.text_with_gaps}\n\nLista:"
-            
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ]
-            
-            print(f"MCP: Built chat prompt for item {item.id}")
-            print(f"DEBUG: MESSAGES SENT TO BIELIK:\n{messages}\n")
-            
-            # Step 2c: Call Bielik /chat (uses proper chat template)
-            print(f"MCP: Calling Bielik /chat for item {item.id}...")
-            raw_output = await bielik_client.chat(
-                model=body.model,
-                messages=messages,
-                max_tokens=body.options.max_new_tokens,
-                temperature=body.options.temperature,
-                top_p=0.9
-            )
-            print(f"MCP: Bielik returned {len(raw_output)} chars for item {item.id}")
-            print(f"DEBUG: FULL RAW OUTPUT FROM BIELIK:\n{raw_output}\n")
-            
-            # Step 2d: Parse response
-            parsed = parse_infill_response(raw_output)
-            print(f"DEBUG: PARSED RESPONSE:\n{parsed}\n")
-            if not parsed or "gaps" not in parsed:
-                print(f"MCP: Failed to parse response for item {item.id}")
-                raise Exception("Failed to parse Bielik response")
-            
-            # Extract alternatives from parsed response
+
+            # Step 2b: Choose strategy based on gap count
+            strategy = choose_strategy(item.text_with_gaps, gaps)
+            print(f"MCP: Using strategy: {strategy} for {len(gaps)} gaps")
+
             alternatives = {}
-            for gap_entry in parsed.get("gaps", []):
-                idx = gap_entry.get("index")
-                choice = gap_entry.get("choice")
-                if idx and choice:
-                    alternatives[idx] = choice
-            
-            print(f"DEBUG: EXTRACTED ALTERNATIVES:\n{alternatives}\n")
-            print(f"MCP: Parsed {len(alternatives)} alternatives for item {item.id}")
+
+            if strategy == "per_gap" or len(gaps) > 5:
+                # Per-gap strategy: process each gap individually
+                print(f"MCP: Processing gaps individually (prevents word copying)")
+
+                # Build individual prompts for each gap
+                per_gap_prompts = build_per_gap_prompts(
+                    item.text_with_gaps,
+                    gaps,
+                    item.attributes,
+                    context_tokens=150
+                )
+
+                # Process each gap
+                for prompt_text, gap, gap_marker in per_gap_prompts:
+                    # Update the prompt to prevent copying
+                    system_msg = (
+                        "Jesteś asystentem sprzedaży samochodów. "
+                        f"Twoim zadaniem jest uzupełnić lukę {gap_marker} w podanym tekście. "
+                        "WYGENERUJ JEDNO nowe słowo (przymiotnik lub rzeczownik) pasujące do kontekstu. "
+                        "NIE kopiuj żadnych słów które widzisz w tekście - wymyśl nowe odpowiednie słowo. "
+                        "Odpowiedź: tylko jedno nowe słowo, bez wyjaśnień."
+                    )
+
+                    # Extract context from prompt
+                    context_part = prompt_text.split("Tekst:\n", 1)[-1].split("\n\n")[0] if "Tekst:\n" in prompt_text else prompt_text
+
+                    messages = [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": f"Tekst:\n{context_part}\n\nWypełnij lukę {gap_marker} - podaj jedno NOWE słowo:"}
+                    ]
+
+                    # Call Bielik for this gap only
+                    raw_output = await bielik_client.chat(
+                        model=body.model,
+                        messages=messages,
+                        max_tokens=20,  # Only need one word
+                        temperature=body.options.temperature,
+                        top_p=0.9
+                    )
+
+                    # Extract the single word (clean it up)
+                    word = raw_output.strip().split()[0] if raw_output.strip() else ""
+                    # Remove punctuation and numbers
+                    word = ''.join(c for c in word if c.isalpha())
+
+                    if word:
+                        alternatives[gap.index] = word
+                        print(f"MCP: Gap {gap.index}: {word}")
+
+            else:
+                # Batched strategy: process all gaps at once (for <=5 gaps)
+                print(f"MCP: Using batched strategy for {len(gaps)} gaps")
+
+                # ============ NEW: Use TextAnalyzer for smart context ============
+                analysis = text_analyzer.analyze(item.text_with_gaps)
+                print(f"MCP: Ad type detected: {analysis.ad_type.value}")
+                print(f"MCP: Keywords: {', '.join(analysis.keywords[:5])}")
+
+                # Build adaptive prompt using TextAnalyzer
+                messages = text_analyzer.build_adaptive_prompt(analysis, item.text_with_gaps)
+                # ================================================================
+
+                # tokens needed: ~5 tokens per gap response + buffer
+                tokens_needed = len(gaps) * 5 + 50
+                max_tokens = min(max(tokens_needed, 200), 1000)
+
+                print(f"MCP: Calling Bielik /chat for batch processing...")
+                raw_output = await bielik_client.chat(
+                    model=body.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=body.options.temperature,
+                    top_p=0.9
+                )
+                print(f"DEBUG: BIELIK OUTPUT:\n{raw_output}\n")
+
+                # Parse response
+                parsed = parse_infill_response(raw_output)
+                if not parsed or "gaps" not in parsed:
+                    raise Exception("Failed to parse Bielik response")
+
+                # Extract alternatives
+                for gap_entry in parsed.get("gaps", []):
+                    idx = gap_entry.get("index")
+                    choice = gap_entry.get("choice")
+                    if idx and choice:
+                        alternatives[idx] = choice
+
+            print(f"MCP: Collected {len(alternatives)} alternatives for {len(gaps)} gaps")
             
             # Step 2e: Reconstruct text
             filled_text = apply_fills(item.text_with_gaps, gaps, alternatives)

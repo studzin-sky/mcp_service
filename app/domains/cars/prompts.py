@@ -51,7 +51,8 @@ def create_infill_prompt(text_with_gaps: str, gaps: list = None, attributes: dic
     """
     system_message = (
         "Jesteś kreatywnym asystentem sprzedaży samochodów. "
-        "Uzupełnij luki [GAP:n] podanym tekstem, wybierając jedno słowo (przymiotnik lub rzeczownik) dla każdej luki. "
+        "Dla każdej luki [GAP:n] WYGENERUJ nowe słowo (przymiotnik lub rzeczownik) pasujące do kontekstu. "
+        "NIE kopiuj słów które już występują w tekście. "
         "Wypisz wynik jako listę numerowaną: 1. słowo\n2. słowo\n..."
     )
 

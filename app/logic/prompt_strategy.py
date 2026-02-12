@@ -84,9 +84,10 @@ def build_per_gap_prompts(
         # Build system message
         system_msg = (
             "Jesteś asystentem sprzedaży samochodów. "
-            "Twoim zadaniem jest uzupełnić lukę [GAP:n] w podanym tekście. "
-            "Wybierz JEDNO słowo (przymiotnik lub rzeczownik), które najlepiej pasuje do kontekstu. "
-            "Odpowiedź: tylko słowo, bez wyjaśnień."
+            f"Twoim zadaniem jest uzupełnić lukę {gap.marker} w podanym tekście. "
+            "WYGENERUJ JEDNO nowe słowo (przymiotnik lub rzeczownik) pasujące do kontekstu. "
+            "NIE kopiuj żadnych słów które widzisz w tekście - wymyśl nowe odpowiednie słowo. "
+            "Odpowiedź: tylko jedno nowe słowo, bez wyjaśnień."
         )
         
         # Build user message with attributes if available
@@ -126,7 +127,8 @@ def build_batched_prompt(
     """
     system_message = (
         "Jesteś kreatywnym asystentem sprzedaży samochodów. "
-        "Uzupełnij luki [GAP:n] w tekście, wybierając jedno słowo dla każdej luki. "
+        "Dla każdej luki [GAP:n] WYGENERUJ nowe słowo (przymiotnik lub rzeczownik) pasujące do kontekstu. "
+        "NIE kopiuj słów które już występują w tekście - wymyśl nowe odpowiednie słowo. "
         "Wypisz wynik jako listę: 1. słowo\\n2. słowo\\n..."
     )
 
