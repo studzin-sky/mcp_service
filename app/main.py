@@ -248,10 +248,7 @@ async def enhance_description(body: EnhancementRequest):
                         top_p=0.9
                     )
 
-                    # Extract the single word (clean it up)
-                    word = raw_output.strip().split()[0] if raw_output.strip() else ""
-                    # Remove punctuation and numbers
-                    word = ''.join(c for c in word if c.isalpha())
+                    word = raw_output.strip()
 
                     if word:
                         alternatives[gap.index] = word
