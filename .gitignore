@@ -22,6 +22,8 @@ docker-compose.yml
 
 # Other
 .DS_Store
+tmpclaude-*-cwd
+tmpclaude-*-cwd/
 
 .env
 *.log
