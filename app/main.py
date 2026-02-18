@@ -158,6 +158,7 @@ async def process_single_gap(client, model, prompt_text, gap, gap_marker, temper
     async with semaphore:
         try:
             # 1. System Prompt
+            # Note: The prompt is intentionally duplicated to reinforce the instructions to the model
             system_msg = (
                 "Jesteś ekspertem redakcyjnym i korektorem tekstów motoryzacyjnych. "
                 "Twoim zadaniem jest przywrócenie brakującego słowa w tekście. "
