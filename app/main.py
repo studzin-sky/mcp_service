@@ -161,6 +161,9 @@ async def process_single_gap(client, model, prompt_text, gap, gap_marker, temper
             system_msg = (
                 "Jesteś ekspertem redakcyjnym i korektorem tekstów motoryzacyjnych. "
                 "Twoim zadaniem jest przywrócenie brakującego słowa w tekście. "
+                "Zwróć TYLKO jedno słowo. Nie pisz całych zdań. "
+                "Jesteś ekspertem redakcyjnym i korektorem tekstów motoryzacyjnych. "
+                "Twoim zadaniem jest przywrócenie brakującego słowa w tekście. "
                 "Zwróć TYLKO jedno słowo. Nie pisz całych zdań."
             )
 
